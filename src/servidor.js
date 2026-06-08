@@ -11,169 +11,284 @@ app.use(express.static(__dirname + "/public"));
 
 const SECRET = "segredo";
 
-// conexão CouchDB
-
 var listaBancos;
 
-// usuários fictícios
-const professores = [
-  {
-    id: "fabio",
-    email: "fabio@ufsc.br",
-    senha: "123",
-    disciplinas: ["dec0007", "dec0020", "dec0040"],
-  },
-  {
-    id: "joao",
-    email: "joao@ufsc.br",
-    senha: "123",
-    disciplinas: ["dec0001", "dec0002", "dec0003"],
-  },
-];
+/*
+Antes, o campo de dados era assim:  
+        dados: [
+            { aluno: "Ana maria", aulas: [] },
+            { aluno: "pedro", aulas: [] },
+            { aluno: "cintia", aulas: [] },
+Veja que tinha um campo de "aulas: []", possivelmente, pode ser que era para registrar as aulas que o aluno foi? 
+Mas isso não foi implementado, então retirei
+*/
 
-const dec0007 = [
-  { aluno: "Ana maria", aulas: [] },
-  { aluno: "pedro", aulas: [] },
-  { aluno: "cintia", aulas: [] },
-];
-const dec0020 = [
-  { aluno: "Ana maria", aulas: [] },
-  { aluno: "pedro", aulas: [] },
-  { aluno: "cintua", aulas: [] },
-];
 const semestre = [
-  { disciplina: "dec0007", dados: dec0007 },
-  { disciplina: "dec0020", dados: dec0020 },
+    {
+        disciplina: "dec0007",
+        dados: [
+            { aluno: "Ana maria", },
+            { aluno: "Pedro", },
+            { aluno: "Cintia", },
+        ],
+    },
+    {
+        disciplina: "dec0020",
+        dados: [
+            { aluno: "Ana Maria", },
+            { aluno: "Pedro", },
+            { aluno: "Cintia", },
+        ],
+    },
 ];
 
 async function criaBD(nomeBanco) {
-  try {
-    if (listaBancos.includes(nomeBanco)) {
-      console.log(`O banco de dados "${nomeBanco}" já existe.`);
-    } else {
-      console.log(`O banco "${nomeBanco}" não existe. Criando agora...`);
-      await nano.db.create(nomeBanco);
-      console.log("Banco de dados criado com sucesso!");
+    try {
+        listaBancos = await nano.db.list();
+        if (listaBancos.includes(nomeBanco)) {
+            console.log(`O banco "${nomeBanco}" ja existe.`);
+        } else {
+            console.log(`O banco "${nomeBanco}" nao existe. Criando...`);
+            await nano.db.create(nomeBanco);
+            console.log("Banco criado com sucesso.");
+        }
+    } catch (error) {
+        console.error("Erro ao verificar banco:", error.message);
     }
-  } catch (error) {
-    console.error("Erro ao verificar banco:", error.message);
-  }
 }
 
 async function criaTodosBancosDados() {
-  listaBancos = await nano.db.list();
+    listaBancos = await nano.db.list();
 
-  for (let a = 0; a < professores.length; a++) {
-    let lista = professores[a].disciplinas;
-    for (let b = 0; b < lista.length; b++) {
-      await criaBD(lista[b]);
+    await criaBD("usuarios");
+
+    const dbUsuarios = nano.use("usuarios");
+
+    try {
+        await dbUsuarios.createIndex({
+            index: {
+                fields: ["email"],
+            },
+        });
+    } catch {}
+
+    try {
+        await dbUsuarios.createIndex({
+            index: {
+                fields: ["id"],
+            },
+        });
+    } catch {}
+
+    let todosProfs = [];
+
+    try {
+        const result = await dbUsuarios.allDocs({
+            include_docs: true,
+        });
+
+        todosProfs = result.rows.map((r) => r.doc);
+    } catch {}
+
+    for (const prof of todosProfs) {
+        for (const disc of prof.disciplinas || []) {
+            await criaBD(disc);
+        }
     }
-  }
 }
 
-// LOGIN
-//
+async function buscaUsuario(email) {
+    const db = nano.use("usuarios");
 
-app.post("/login", (req, res) => {
-  const { email, senha } = req.body;
+    try {
+        const result = await db.find({
+            selector: {
+                email,
+            },
+        });
 
-  const prof = professores.find((p) => p.email === email && p.senha === senha);
+        return result.docs[0] || null;
+    } catch {
+        return null;
+    }
+}
 
-  if (!prof) {
-    return res.status(401).send("Login inválido");
-  }
+async function buscaUsuarioPorId(id) {
+    const db = nano.use("usuarios");
 
-  const token = jwt.sign(
-    {
-      id: prof.id,
-    },
-    SECRET,
-  );
-  res.json({ token });
-});
+    try {
+        const result = await db.find({
+            selector: {
+                id,
+            },
+        });
 
-// middleware autenticação
+        return result.docs[0] || null;
+    } catch {
+        return null;
+    }
+}
+
+function dadosDisciplina(nome) {
+    for (let a = 0; a < semestre.length; a++) {
+        if (nome === semestre[a].disciplina) {
+            return semestre[a].dados;
+        }
+    }
+
+    return [];
+}
+
 function autenticar(req, res, next) {
-  const auth = req.headers.authorization;
+    const auth = req.headers.authorization;
 
-  if (!auth) {
-    return res.status(401).send("Sem token");
-  }
+    if (!auth) {
+        return res.status(401).send("Sem token");
+    }
 
-  const token = auth.split(" ")[1];
+    const token = auth.split(" ")[1];
 
-  try {
-    const decoded = jwt.verify(token, SECRET);
-    console.log(decoded.id);
-    req.usuario = decoded.id;
+    try {
+        const decoded = jwt.verify(token, SECRET);
 
-    next();
-  } catch {
-    res.status(401).send("Token inválido");
-  }
+        req.usuario = decoded.id;
+
+        next();
+    } catch {
+        res.status(401).send("Token invalido");
+    }
 }
 
-// sincronização
+app.post("/cadastro", async (req, res) => {
+    const { id, email, senha, disciplinas } = req.body;
+
+    if (!id || !email || !senha) {
+        return res
+            .status(400)
+            .send("Campos obrigatorios: id, email, senha");
+    }
+
+    const existente = await buscaUsuario(email);
+
+    if (existente) {
+        return res.status(409).send("Email ja cadastrado");
+    }
+
+    try {
+        const db = nano.use("usuarios");
+
+        await db.insert({
+            id,
+            email,
+            senha,
+            disciplinas: disciplinas || [],
+        });
+
+        res.send("Cadastro realizado");
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Erro ao cadastrar");
+    }
+});
+
+app.post("/login", async (req, res) => {
+    const { email, senha } = req.body;
+
+    const prof = await buscaUsuario(email);
+
+    if (!prof || prof.senha !== senha) {
+        return res.status(401).send("Login invalido");
+    }
+
+    const token = jwt.sign(
+        {
+            id: prof.id,
+        },
+        SECRET,
+        {
+            expiresIn: "8h",
+        },
+    );
+
+    res.json({
+        token,
+        id: prof.id,
+        disciplinas: prof.disciplinas,
+    });
+});
+
 app.get("/init", async (req, res) => {
-  // deve ser chamada para precriar os bancos de dados
-  await criaTodosBancosDados();
-  res.end();
+    await criaTodosBancosDados();
+    res.end();
 });
 
-function retornaListaDisciplinas(nome) {
-  for (let a = 0; a < professores.length; a++) {
-    if (nome == professores[a].id) {
-      return professores[a].disciplinas;
+app.get("/disciplinas", autenticar, async (req, res) => {
+    const prof = await buscaUsuarioPorId(req.usuario);
+
+    if (!prof) {
+        return res.status(404).send("Usuario nao encontrado");
     }
-  }
-  return [];
-}
-function dadosDiscplina(nome) {
-  for (let a = 0; a < semestre.length; a++) {
-    if (nome == semestre[a].disciplina) {
-      return semestre[a].dados;
-    }
-  }
-  return [];
-}
-// Professor pergunta sua lista de discplinas
-app.get("/disciplinas", autenticar, (req, res) => {
-  res.send(retornaListaDisciplinas(req.usuario));
+
+    res.send(prof.disciplinas || []);
 });
 
-// Professor pergunta informacoes sobre 1 disciplina
 app.get("/disciplinas/:disciplina", autenticar, (req, res) => {
-  const disciplina = req.params.disciplina; //
-  let x = dadosDiscplina(disciplina);
-  res.send(x);
+    const dados = dadosDisciplina(req.params.disciplina);
+
+    res.send(dados);
 });
 
-// professor sincroniza uma disciplina
 app.post("/sync/:disciplina", autenticar, async (req, res) => {
-  const disciplina = req.params.disciplina; // quem é o professor
-  const disciplinas = retornaListaDisciplinas(req.usuario); // sua lista de disciplinas
-  // verifica permissão
-  if (!disciplinas.includes(disciplina)) {
-    return res.status(403).send("Professor sem acesso a esta disciplina");
-  }
+    const disciplina = req.params.disciplina;
 
-  try {
-    const db = nano.use(disciplina);
+    const prof = await buscaUsuarioPorId(req.usuario);
 
-    const docs = req.body.docs;
-
-    for (const doc of docs) {
-      await db.insert(doc);
+    if (!prof) {
+        return res.status(404).send("Usuario nao encontrado");
     }
 
-    res.send("Sincronização realizada");
-  } catch (err) {
-    console.error(err);
+    if (!prof.disciplinas.includes(disciplina)) {
+        return res
+            .status(403)
+            .send("Professor sem acesso a esta disciplina");
+    }
 
-    res.status(500).send("Erro");
-  }
+    try {
+        const db = nano.use(disciplina);
+
+        const docs = req.body.docs;
+
+        for (const doc of docs) {
+            try {
+                const existente = await db.get(doc._id);
+
+                await db.insert({
+                    ...doc,
+                    _rev: existente._rev
+                });
+
+            } catch (err) {
+
+                if (err.statusCode === 404) {
+
+                    const novoDoc = { ...doc };
+                    delete novoDoc._rev;
+
+                    await db.insert(novoDoc);
+
+                } else {
+                    throw err;
+                }
+            }
+        }
+
+        res.send("Sincronizacao realizada");
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Erro");
+    }
 });
 
 app.listen(7000, () => {
-  console.log("Servidor iniciado");
+    console.log("Servidor iniciado na porta 7000");
 });
