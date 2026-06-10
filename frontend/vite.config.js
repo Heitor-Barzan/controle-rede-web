@@ -16,6 +16,7 @@ export default defineConfig({
             "/disciplinas": "http://localhost:7000",
             "/sync": "http://localhost:7000",
             "/init": "http://localhost:7000",
+            "/api/admin": "http://localhost:7000",
         },
     },
 });

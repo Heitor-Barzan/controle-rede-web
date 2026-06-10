@@ -10,6 +10,8 @@ app.use(express.json());
 app.use(express.static(__dirname + "/public"));
 
 const SECRET = "segredo";
+const ADMIN_ID = "admin";
+const ADMIN_SENHA = "admin123";
 
 var listaBancos;
 
@@ -83,7 +85,7 @@ async function criaTodosBancosDados() {
     let todosProfs = [];
 
     try {
-        const result = await dbUsuarios.allDocs({
+        const result = await dbUsuarios.list({
             include_docs: true,
         });
 
@@ -159,6 +161,40 @@ function autenticar(req, res, next) {
     }
 }
 
+function autenticarAdmin(req, res, next) {
+    const auth = req.headers.authorization;
+
+    if (!auth) {
+        return res.status(401).send("Sem token");
+    }
+
+    const token = auth.split(" ")[1];
+
+    try {
+        const decoded = jwt.verify(token, SECRET);
+
+        if (decoded.role !== "admin") {
+            return res.status(403).send("Acesso negado");
+        }
+
+        next();
+    } catch {
+        res.status(401).send("Token invalido");
+    }
+}
+
+app.post("/api/admin/login", (req, res) => {
+    const { id, senha } = req.body;
+
+    if (id !== ADMIN_ID || senha !== ADMIN_SENHA) {
+        return res.status(401).send("Credenciais invalidas");
+    }
+
+    const token = jwt.sign({ role: "admin" }, SECRET, { expiresIn: "8h" });
+
+    res.json({ token });
+});
+
 app.post("/cadastro", async (req, res) => {
     const { id, email, senha, disciplinas } = req.body;
 
@@ -183,6 +219,10 @@ app.post("/cadastro", async (req, res) => {
             senha,
             disciplinas: disciplinas || [],
         });
+
+        for (const disc of disciplinas || []) {
+            await criaBD(disc);
+        }
 
         res.send("Cadastro realizado");
     } catch (err) {
@@ -232,10 +272,23 @@ app.get("/disciplinas", autenticar, async (req, res) => {
     res.send(prof.disciplinas || []);
 });
 
-app.get("/disciplinas/:disciplina", autenticar, (req, res) => {
-    const dados = dadosDisciplina(req.params.disciplina);
+app.get("/disciplinas/:disciplina", autenticar, async (req, res) => {
+    const disciplina = req.params.disciplina;
 
-    res.send(dados);
+    try {
+        const db = nano.use(disciplina);
+        const result = await db.list({ include_docs: true });
+        const alunos = result.rows
+            .map((r) => r.doc)
+            .filter((d) => d.tipo === "aluno")
+            .map((d) => ({ aluno: d.aluno }));
+
+        if (alunos.length > 0) {
+            return res.json(alunos);
+        }
+    } catch {}
+
+    res.json(dadosDisciplina(disciplina));
 });
 
 app.post("/sync/:disciplina", autenticar, async (req, res) => {
@@ -254,6 +307,8 @@ app.post("/sync/:disciplina", autenticar, async (req, res) => {
     }
 
     try {
+        await criaBD(disciplina);
+
         const db = nano.use(disciplina);
 
         const docs = req.body.docs;
@@ -264,18 +319,13 @@ app.post("/sync/:disciplina", autenticar, async (req, res) => {
 
                 await db.insert({
                     ...doc,
-                    _rev: existente._rev
+                    _rev: existente._rev,
                 });
-
             } catch (err) {
-
-                if (err.statusCode === 404) {
-
+                if (err.statusCode === 404 || err.status === 404) {
                     const novoDoc = { ...doc };
                     delete novoDoc._rev;
-
                     await db.insert(novoDoc);
-
                 } else {
                     throw err;
                 }
@@ -286,6 +336,53 @@ app.post("/sync/:disciplina", autenticar, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).send("Erro");
+    }
+});
+
+app.get("/api/admin/disciplinas", autenticarAdmin, async (req, res) => {
+    try {
+        const db = nano.use("usuarios");
+        const result = await db.list({ include_docs: true });
+        const profs = result.rows.map((r) => r.doc);
+        const discs = [...new Set(profs.flatMap((p) => p.disciplinas || []))];
+        res.json(discs);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Erro ao buscar disciplinas");
+    }
+});
+
+app.get("/api/admin/disciplinas/:disciplina", autenticarAdmin, async (req, res) => {
+    const disciplina = req.params.disciplina;
+    try {
+        const db = nano.use(disciplina);
+        const result = await db.list({ include_docs: true });
+        const docs = result.rows.map((r) => r.doc);
+        const aulas = docs.filter((d) => d.data);
+
+        const freq = {};
+        for (const aula of aulas) {
+            for (const reg of aula.registros || []) {
+                if (!freq[reg.nome]) freq[reg.nome] = { presencas: 0, faltas: 0 };
+                if (reg.presente) freq[reg.nome].presencas++;
+                else freq[reg.nome].faltas++;
+            }
+        }
+
+        const alunos = Object.entries(freq).map(([nome, d]) => ({
+            nome,
+            presencas: d.presencas,
+            faltas: d.faltas,
+            total: d.presencas + d.faltas,
+            frequencia:
+                d.presencas + d.faltas > 0
+                    ? Math.round((d.presencas / (d.presencas + d.faltas)) * 100)
+                    : 0,
+        }));
+
+        res.json({ totalAulas: aulas.length, alunos });
+    } catch {
+        res.json({ totalAulas: 0, alunos: [] });
     }
 });
 
