@@ -358,7 +358,7 @@ app.get("/api/admin/disciplinas/:disciplina", autenticarAdmin, async (req, res) 
         const db = nano.use(disciplina);
         const result = await db.list({ include_docs: true });
         const docs = result.rows.map((r) => r.doc);
-        const aulas = docs.filter((d) => d.data);
+        const aulas = docs.filter((d) => d.data && d.sincronizado === true);
 
         const freq = {};
         for (const aula of aulas) {
